@@ -1,61 +1,73 @@
+
 #include <WiFi.h>
 #include <WiFiClient.h>
+#include <WiFiClientSecure.h>
 #include <WebServer.h>
 #include <ESPmDNS.h>
+#include <HTTPClient.h>
 #include <Update.h>
+#include <ArduinoJson.h>
 
-// ===== Wi-Fi 設定 =====
+// ==================================================
+// Wi-Fi 設定
+// ==================================================
 const char* host = "esp32";
-const char* ssid = "YOUR_WIFI_SSID";
-const char* password = "YOUR_WIFI_PASSWORD";
+const char* ssid = "labor";
+const char* password = "98668800";
 
-// ===== GitHub 網頁版本設定 =====
-// 這是目前 ESP32 管理頁面內建的版本
-const char* CURRENT_WEB_VERSION = "1.0.0";
+// ==================================================
+// GitHub OTA 設定
+// ==================================================
+const char* CURRENT_VERSION = "0.0.1";
 
-const char* GITHUB_VERSION_URL =
-  "https://abbie210238.github.io/20261019_EPS32_OTAWebupdater/version.json";
+const char* VERSION_URL =
+  "https://raw.githubusercontent.com/abbie210238/20261019_EPS32_OTAWebupdater/main/version.json";
 
-const char* GITHUB_PAGE_URL =
-  "https://abbie210238.github.io/20261019_EPS32_OTAWebupdater/";
+const unsigned long UPDATE_INTERVAL =
+  6UL * 60UL * 60UL * 1000UL;
+
+const unsigned long HTTP_TIMEOUT = 20000;
 
 WebServer server(80);
 
-// ===== 登入頁面 =====
+unsigned long lastUpdateCheck = 0;
+bool updateInProgress = false;
+
+String latestFirmwareURL = "";
+String latestCommit = "";
+
+// ==================================================
+// 登入頁面
+// ==================================================
 const char* loginIndex = R"rawliteral(
 <!DOCTYPE html>
-<html lang="zh-Hant">
+<html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ESP32 Login</title>
-<style>
-body{font-family:Arial,sans-serif;background:#f1f5f9;padding:30px}
-.card{max-width:360px;margin:40px auto;background:white;padding:24px;
-border-radius:12px;box-shadow:0 4px 15px #0001}
-input{box-sizing:border-box;width:100%;padding:12px;margin:8px 0}
-button{width:100%;padding:12px;background:#2563eb;color:white;
-border:0;border-radius:6px;cursor:pointer}
-</style>
 </head>
 <body>
-<div class="card">
 <h2>ESP32 OTA Login</h2>
 <form onsubmit="return checkLogin(event)">
-<label>Username</label>
-<input type="text" id="userid" required>
-<label>Password</label>
-<input type="password" id="pwd" required>
-<button type="submit">Login</button>
+  <p>Username:
+    <input id="userid" type="text" required>
+  </p>
+  <p>Password:
+    <input id="pwd" type="password" required>
+  </p>
+  <button type="submit">Login</button>
 </form>
-</div>
 <script>
-function checkLogin(e){
-  e.preventDefault();
-  if(document.getElementById('userid').value==='admin' &&
-     document.getElementById('pwd').value==='admin'){
-    window.location.href='/serverIndex';
-  }else{
+function checkLogin(event) {
+  event.preventDefault();
+
+  if (
+    document.getElementById('userid').value === 'admin' &&
+    document.getElementById('pwd').value === 'admin'
+  ) {
+    window.location.href = '/serverIndex';
+  } else {
     alert('帳號或密碼錯誤');
   }
   return false;
@@ -65,220 +77,64 @@ function checkLogin(e){
 </html>
 )rawliteral";
 
-// ===== OTA 管理頁面 =====
+// ==================================================
+// 手動 OTA 網頁
+// ==================================================
 const char* serverIndex = R"rawliteral(
 <!DOCTYPE html>
-<html lang="zh-Hant">
+<html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ESP32 OTA Web Updater</title>
-<style>
-body{font-family:Arial,sans-serif;background:#f1f5f9;
-margin:0;padding:20px;color:#1e293b}
-.card{max-width:600px;margin:20px auto;background:white;
-padding:22px;border-radius:12px;box-shadow:0 4px 15px #0001}
-button,.btn{padding:11px 16px;border:0;border-radius:6px;
-background:#2563eb;color:white;cursor:pointer;text-decoration:none;
-display:inline-block}
-input[type=file]{margin:15px 0;width:100%}
-#progressOuter{background:#e2e8f0;height:22px;border-radius:10px;
-overflow:hidden}
-#progressBar{height:100%;width:0;background:#16a34a;
-transition:width .2s}
-#updateStatus{margin-top:10px;overflow-wrap:anywhere}
-#githubStatus{padding:15px;border-radius:8px;background:#f1f5f9;
-overflow-wrap:anywhere}
-small{color:#64748b}
-</style>
+<title>ESP32 OTA Updater</title>
 </head>
 <body>
-<div class="card">
-<h2>ESP32 OTA Web Updater</h2>
-<p>目前管理頁面版本：<b id="currentVersion"></b></p>
+<h2>ESP32 OTA 韌體更新</h2>
+<p>目前韌體版本：CURRENT_VERSION_PLACEHOLDER</p>
 
-<h3>GitHub 網頁更新檢查</h3>
-<div id="githubStatus">正在檢查 GitHub 最新版本...</div>
-<p><a class="btn" href="https://abbie210238.github.io/20261019_EPS32_OTAWebupdater/"
-target="_blank" rel="noopener noreferrer">開啟 GitHub Pages</a></p>
-
-<hr>
-
-<h3>ESP32 韌體 OTA 更新</h3>
-<form id="uploadForm">
-<input type="file" name="update" accept=".bin" required>
-<button type="submit" id="uploadButton">上傳韌體</button>
+<form id="upload_form" enctype="multipart/form-data">
+  <input type="file" name="update" accept=".bin" required>
+  <button type="submit">上傳韌體</button>
 </form>
 
-<div id="progressOuter">
-<div id="progressBar"></div>
-</div>
-<p id="updateStatus">等待上傳</p>
-<small>請選擇適用於目前 ESP32 的韌體 .bin 檔案。</small>
-</div>
+<p id="status">等待上傳</p>
+<progress id="progress" value="0" max="100"></progress>
 
 <script>
-const CURRENT_WEB_VERSION = "1.0.0";
-
-const VERSION_URL =
-"https://abbie210238.github.io/20261019_EPS32_OTAWebupdater/version.json";
-
-const GITHUB_URL =
-"https://github.com/abbie210238/20261019_EPS32_OTAWebupdater";
-
-document.getElementById('currentVersion').textContent =
-CURRENT_WEB_VERSION;
-
-// 比較一般的數字版本，例如 1.0.0、1.1.0、2.0.0
-function compareVersions(a,b){
-  const pa = String(a).split('.').map(x => parseInt(x,10) || 0);
-  const pb = String(b).split('.').map(x => parseInt(x,10) || 0);
-  const n = Math.max(pa.length,pb.length);
-
-  for(let i=0;i<n;i++){
-    const x = pa[i] || 0;
-    const y = pb[i] || 0;
-    if(x > y) return 1;
-    if(x < y) return -1;
-  }
-  return 0;
-}
-
-// 每次開啟管理頁面都檢查 GitHub
-async function checkGitHubUpdate(){
-  const box = document.getElementById('githubStatus');
-  box.textContent = '正在連線 GitHub...';
-
-  try{
-    const response = await fetch(
-      VERSION_URL + '?t=' + Date.now(),
-      {cache:'no-store'}
-    );
-
-    if(!response.ok){
-      throw new Error('HTTP ' + response.status);
-    }
-
-    const data = await response.json();
-
-    if(!data.version){
-      throw new Error('version.json 缺少 version 欄位');
-    }
-
-    const latestVersion = String(data.version);
-    const commit = data.commit ? String(data.commit) : '';
-
-    box.replaceChildren();
-
-    const heading = document.createElement('strong');
-    heading.textContent = 'GitHub 最新版本：' + latestVersion;
-    box.appendChild(heading);
-
-    const detail = document.createElement('p');
-
-    const result = compareVersions(
-      latestVersion,
-      CURRENT_WEB_VERSION
-    );
-
-    if(result > 0){
-      box.style.background = '#fef3c7';
-      detail.textContent =
-        '🆕 GitHub 有新版！請查看更新內容並重新載入網頁。';
-
-      const link = document.createElement('a');
-      link.href = GITHUB_URL;
-      link.target = '_blank';
-      link.rel = 'noopener noreferrer';
-      link.textContent = '前往 GitHub 專案查看更新';
-      box.appendChild(detail);
-      box.appendChild(link);
-
-    }else if(result === 0){
-      box.style.background = '#dcfce7';
-      detail.textContent =
-        '✅ 目前管理頁面版本與 GitHub 版本一致。';
-      box.appendChild(detail);
-
-    }else{
-      box.style.background = '#dbeafe';
-      detail.textContent =
-        'ℹ️ GitHub 公布的版本號低於目前管理頁面版本。';
-      box.appendChild(detail);
-    }
-
-    if(commit){
-      const commitText = document.createElement('p');
-      commitText.textContent = 'Commit: ' + commit;
-      box.appendChild(commitText);
-    }
-
-  }catch(error){
-    box.style.background = '#fee2e2';
-    box.textContent =
-      'GitHub 更新檢查失敗；請確認網路及 version.json。';
-    console.error('GitHub version check failed:',error);
-  }
-}
-
-checkGitHubUpdate();
-
-// ===== OTA 韌體上傳 =====
-document.getElementById('uploadForm').addEventListener(
-  'submit',function(e){
+document.getElementById('upload_form').addEventListener(
+  'submit', function(e) {
     e.preventDefault();
 
-    const fileInput = this.querySelector('input[type=file]');
-    if(!fileInput.files.length){
-      alert('請先選擇 .bin 韌體檔案');
-      return;
-    }
-
-    const button = document.getElementById('uploadButton');
-    const status = document.getElementById('updateStatus');
-    const bar = document.getElementById('progressBar');
-
-    const formData = new FormData();
-    formData.append('update',fileInput.files[0]);
-
+    const data = new FormData(this);
     const xhr = new XMLHttpRequest();
-    button.disabled = true;
-    status.textContent = '準備上傳...';
 
-    xhr.open('POST','/update',true);
-    xhr.timeout = 180000;
+    xhr.open('POST', '/update', true);
 
-    xhr.upload.addEventListener('progress',function(evt){
-      if(evt.lengthComputable){
-        const percent = Math.round(evt.loaded / evt.total * 100);
-        bar.style.width = percent + '%';
-        status.textContent = '上傳進度：' + percent + '%';
-      }
-    });
-
-    xhr.onload = function(){
-      button.disabled = false;
-
-      if(xhr.status === 200 && xhr.responseText.trim() === 'OK'){
-        status.textContent = '更新成功，ESP32 即將重新啟動...';
-      }else{
-        status.textContent =
-          '更新失敗：' + (xhr.responseText || xhr.status);
+    xhr.upload.onprogress = function(event) {
+      if (event.lengthComputable) {
+        const p = Math.round(event.loaded / event.total * 100);
+        document.getElementById('progress').value = p;
+        document.getElementById('status').textContent =
+          '上傳進度：' + p + '%';
       }
     };
 
-    xhr.onerror = function(){
-      button.disabled = false;
-      status.textContent =
-        '連線中斷，請確認 ESP32 狀態。';
+    xhr.onload = function() {
+      document.getElementById('status').textContent =
+        xhr.responseText;
+
+      if (xhr.status === 200 && xhr.responseText === 'OK') {
+        document.getElementById('status').textContent =
+          '更新成功，ESP32 即將重新啟動';
+      }
     };
 
-    xhr.ontimeout = function(){
-      button.disabled = false;
-      status.textContent = '上傳逾時，請重新確認裝置狀態。';
+    xhr.onerror = function() {
+      document.getElementById('status').textContent =
+        '網路連線失敗';
     };
 
-    xhr.send(formData);
+    xhr.send(data);
   }
 );
 </script>
@@ -286,97 +142,406 @@ document.getElementById('uploadForm').addEventListener(
 </html>
 )rawliteral";
 
-// ===== 初始化 =====
+// ==================================================
+// 版本比較
+// ==================================================
+bool isNewerVersion(
+  const String& remoteVersion,
+  const char* currentVersion
+) {
+  int r1, r2, r3;
+  int c1, c2, c3;
+
+  if (sscanf(remoteVersion.c_str(), "%d.%d.%d",
+             &r1, &r2, &r3) != 3) {
+    return false;
+  }
+
+  if (sscanf(currentVersion, "%d.%d.%d",
+             &c1, &c2, &c3) != 3) {
+    return false;
+  }
+
+  if (r1 < 0 || r2 < 0 || r3 < 0 ||
+      c1 < 0 || c2 < 0 || c3 < 0) {
+    return false;
+  }
+
+  if (r1 != c1) return r1 > c1;
+  if (r2 != c2) return r2 > c2;
+
+  return r3 > c3;
+}
+
+// ==================================================
+// HTTPS GET
+// ==================================================
+bool httpsGet(const char* url, String& response) {
+  WiFiClientSecure client;
+
+  // 測試用途；正式使用請驗證 CA 憑證
+  client.setInsecure();
+
+  HTTPClient http;
+  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+  http.setTimeout(HTTP_TIMEOUT);
+
+  if (!http.begin(client, url)) {
+    Serial.println("HTTPS 初始化失敗");
+    return false;
+  }
+
+  int code = http.GET();
+
+  if (code == HTTP_CODE_OK) {
+    response = http.getString();
+    http.end();
+    return true;
+  }
+
+  Serial.printf("HTTP GET 失敗：%d\n", code);
+  http.end();
+  return false;
+}
+
+// ==================================================
+// 讀取 GitHub version.json
+// ==================================================
+String getLatestVersion() {
+  String json;
+
+  latestFirmwareURL = "";
+  latestCommit = "";
+
+  if (!httpsGet(VERSION_URL, json)) {
+    Serial.println("無法讀取 GitHub 版本檔");
+    return "";
+  }
+
+  Serial.println("===== GitHub version.json =====");
+  Serial.println(json);
+
+  JsonDocument doc;
+  DeserializationError error = deserializeJson(doc, json);
+
+  if (error) {
+    Serial.print("JSON 解析失敗：");
+    Serial.println(error.c_str());
+    return "";
+  }
+
+  const char* version = doc["version"] | "";
+  const char* firmwareURL = doc["firmware_url"] | "";
+  const char* commit = doc["commit"] | "";
+
+  if (strlen(version) == 0 ||
+      strlen(firmwareURL) == 0) {
+    Serial.println("JSON 缺少必要欄位");
+    return "";
+  }
+
+  latestFirmwareURL = firmwareURL;
+  latestCommit = commit;
+
+  if (!latestFirmwareURL.startsWith("https://")) {
+    Serial.println("韌體網址必須使用 HTTPS");
+    latestFirmwareURL = "";
+    return "";
+  }
+
+  int v1, v2, v3;
+
+  if (sscanf(version, "%d.%d.%d", &v1, &v2, &v3) != 3 ||
+      v1 < 0 || v2 < 0 || v3 < 0) {
+    Serial.println("版本號格式錯誤");
+    latestFirmwareURL = "";
+    return "";
+  }
+
+  return String(version);
+}
+
+// ==================================================
+// 下載並安裝 GitHub 韌體
+// ==================================================
+bool downloadAndInstallFirmware() {
+  if (updateInProgress || latestFirmwareURL.isEmpty()) {
+    return false;
+  }
+
+  updateInProgress = true;
+
+  WiFiClientSecure client;
+  client.setInsecure();
+
+  HTTPClient http;
+  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+  http.setTimeout(30000);
+
+  Serial.println("開始下載 GitHub 韌體");
+  Serial.println(latestFirmwareURL);
+
+  if (!http.begin(client, latestFirmwareURL)) {
+    Serial.println("韌體連線初始化失敗");
+    updateInProgress = false;
+    return false;
+  }
+
+  int code = http.GET();
+
+  if (code != HTTP_CODE_OK) {
+    Serial.printf("韌體下載失敗，HTTP=%d\n", code);
+    http.end();
+    updateInProgress = false;
+    return false;
+  }
+
+  int contentLength = http.getSize();
+
+  if (contentLength <= 0) {
+    Serial.println("韌體檔案大小無效");
+    http.end();
+    updateInProgress = false;
+    return false;
+  }
+
+  Serial.printf("韌體大小：%d bytes\n", contentLength);
+
+  if (!Update.begin((size_t)contentLength)) {
+    Serial.println("OTA 無法開始，請檢查分割區空間");
+    Update.printError(Serial);
+    http.end();
+    updateInProgress = false;
+    return false;
+  }
+
+  WiFiClient* stream = http.getStreamPtr();
+  size_t written = Update.writeStream(*stream);
+
+  Serial.printf("已寫入：%u / %d bytes\n",
+                (unsigned int)written, contentLength);
+
+  http.end();
+
+  bool success = false;
+
+  if (written == (size_t)contentLength) {
+    success = Update.end(true);
+  } else {
+    Serial.println("韌體下載不完整，中止更新");
+    Update.abort();
+  }
+
+  if (!success) {
+    Serial.println("OTA 更新失敗");
+    Update.printError(Serial);
+    updateInProgress = false;
+    return false;
+  }
+
+  Serial.println("OTA 更新成功，即將重新啟動");
+  delay(1000);
+  ESP.restart();
+
+  return true;
+}
+
+// ==================================================
+// 檢查 GitHub 更新
+// ==================================================
+void checkGitHubUpdate() {
+  if (updateInProgress) return;
+
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("Wi-Fi 未連線，略過版本檢查");
+    return;
+  }
+
+  Serial.println();
+  Serial.println("===== GitHub OTA 版本檢查 =====");
+  Serial.printf("目前版本：%s\n", CURRENT_VERSION);
+
+  String remoteVersion = getLatestVersion();
+
+  if (remoteVersion.length() == 0) {
+    Serial.println("無法取得有效版本，稍後再試");
+    return;
+  }
+
+  Serial.printf("GitHub 版本：%s\n", remoteVersion.c_str());
+  Serial.printf("更新資訊：%s\n", latestCommit.c_str());
+
+  if (isNewerVersion(remoteVersion, CURRENT_VERSION)) {
+    Serial.println("發現新版，開始 OTA 更新");
+    downloadAndInstallFirmware();
+  } else {
+    Serial.println("目前沒有較新的版本");
+  }
+}
+
+// ==================================================
+// 手動 OTA 上傳
+// ==================================================
+bool manualUploadFailed = false;
+bool manualUploadStarted = false;
+
+void handleUpload() {
+  HTTPUpload& upload = server.upload();
+
+  if (upload.status == UPLOAD_FILE_START) {
+    manualUploadFailed = false;
+    manualUploadStarted = false;
+
+    Serial.printf("手動 OTA 開始：%s\n",
+                  upload.filename.c_str());
+
+    if (!upload.filename.endsWith(".bin")) {
+      Serial.println("只允許上傳 .bin 檔案");
+      manualUploadFailed = true;
+      return;
+    }
+
+    if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
+      Update.printError(Serial);
+      manualUploadFailed = true;
+      return;
+    }
+
+    manualUploadStarted = true;
+
+  } else if (upload.status == UPLOAD_FILE_WRITE) {
+    if (manualUploadStarted && !manualUploadFailed) {
+      if (Update.write(upload.buf, upload.currentSize) !=
+          upload.currentSize) {
+        Update.printError(Serial);
+        manualUploadFailed = true;
+      }
+    }
+
+  } else if (upload.status == UPLOAD_FILE_END) {
+    if (manualUploadStarted && !manualUploadFailed) {
+      if (Update.end(true)) {
+        Serial.printf("手動 OTA 成功：%u bytes\n",
+                      upload.totalSize);
+      } else {
+        Update.printError(Serial);
+        manualUploadFailed = true;
+      }
+    }
+
+  } else if (upload.status == UPLOAD_FILE_ABORTED) {
+    if (manualUploadStarted) {
+      Update.abort();
+    }
+
+    manualUploadFailed = true;
+    Serial.println("手動 OTA 已中止");
+  }
+}
+
+// ==================================================
+// Setup
+// ==================================================
 void setup() {
   Serial.begin(115200);
+  delay(500);
 
+  Serial.println();
+  Serial.println("ESP32 GitHub OTA 啟動");
+  Serial.printf("目前韌體版本：%s\n", CURRENT_VERSION);
+
+  WiFi.mode(WIFI_STA);
   WiFi.begin(ssid, password);
-  Serial.print("Connecting to WiFi");
 
-  while(WiFi.status() != WL_CONNECTED){
+  Serial.print("正在連接 Wi-Fi");
+
+  unsigned long startTime = millis();
+
+  while (WiFi.status() != WL_CONNECTED &&
+         millis() - startTime < 30000) {
     delay(500);
     Serial.print(".");
   }
 
   Serial.println();
-  Serial.print("Connected. IP: ");
-  Serial.println(WiFi.localIP());
 
-  if(!MDNS.begin(host)){
-    Serial.println("mDNS start failed");
-  }else{
-    Serial.println("mDNS started: http://esp32.local");
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("Wi-Fi 連線成功");
+    Serial.print("IP 位址：");
+    Serial.println(WiFi.localIP());
+
+    if (MDNS.begin(host)) {
+      Serial.println("mDNS 已啟動：http://esp32.local");
+    } else {
+      Serial.println("mDNS 啟動失敗");
+    }
+  } else {
+    Serial.println("Wi-Fi 連線逾時，稍後重試");
   }
 
-  // 登入首頁
-  server.on("/", HTTP_GET, [](){
-    server.sendHeader("Cache-Control","no-store");
-    server.send(200,"text/html; charset=utf-8",loginIndex);
+  server.on("/", HTTP_GET, []() {
+    server.sendHeader("Connection", "close");
+    server.send(200, "text/html; charset=utf-8", loginIndex);
   });
 
-  // OTA 管理頁
-  server.on("/serverIndex", HTTP_GET, [](){
-    server.sendHeader("Cache-Control","no-store");
-    server.send(200,"text/html; charset=utf-8",serverIndex);
+  server.on("/serverIndex", HTTP_GET, []() {
+    String page = String(serverIndex);
+
+    page.replace("CURRENT_VERSION_PLACEHOLDER",
+                 CURRENT_VERSION);
+
+    server.sendHeader("Connection", "close");
+    server.send(200, "text/html; charset=utf-8", page);
   });
 
-  // OTA 更新結果
-  server.on("/update", HTTP_POST, [](){
-    bool success = !Update.hasError();
+  server.on("/update", HTTP_POST,
+    []() {
+      bool success = manualUploadStarted &&
+                     !manualUploadFailed &&
+                     !Update.hasError();
 
-    server.sendHeader("Connection","close");
-    server.send(200,"text/plain",success ? "OK" : "FAIL");
+      server.sendHeader("Connection", "close");
+      server.send(success ? 200 : 500, "text/plain",
+                  success ? "OK" : "FAIL");
 
-    if(success){
-      Serial.println("OTA successful. Restarting...");
-      delay(1000);
-      ESP.restart();
-    }else{
-      Serial.println("OTA failed.");
-    }
-  }, [](){
-    HTTPUpload& upload = server.upload();
-
-    if(upload.status == UPLOAD_FILE_START){
-      Serial.printf("Update started: %s\n",
-                    upload.filename.c_str());
-
-      if(!Update.begin(UPDATE_SIZE_UNKNOWN)){
-        Update.printError(Serial);
+      if (success) {
+        delay(500);
+        ESP.restart();
       }
+    },
+    handleUpload
+  );
 
-    }else if(upload.status == UPLOAD_FILE_WRITE){
-      if(Update.write(upload.buf,upload.currentSize)
-         != upload.currentSize){
-        Update.printError(Serial);
-      }
-
-    }else if(upload.status == UPLOAD_FILE_END){
-      if(Update.end(true)){
-        Serial.printf("Update success: %u bytes\n",
-                      upload.totalSize);
-      }else{
-        Update.printError(Serial);
-      }
-
-    }else if(upload.status == UPLOAD_FILE_ABORTED){
-      Update.abort();
-      Serial.println("OTA upload aborted.");
-    }
-  });
-
-  server.onNotFound([](){
-    server.send(404,"text/plain","Not found");
+  server.onNotFound([]() {
+    server.send(404, "text/plain", "Not found");
   });
 
   server.begin();
-  Serial.println("HTTP server started");
-  Serial.print("Current web version: ");
-  Serial.println(CURRENT_WEB_VERSION);
+  Serial.println("Web OTA Server Started");
+
+  // 開機後立即檢查
+  lastUpdateCheck = millis() - UPDATE_INTERVAL;
 }
 
-// ===== 主迴圈 =====
+// ==================================================
+// Loop
+// ==================================================
 void loop() {
   server.handleClient();
-  delay(2);
+
+  static unsigned long lastWiFiRetry = 0;
+
+  if (WiFi.status() != WL_CONNECTED &&
+      millis() - lastWiFiRetry >= 10000) {
+    lastWiFiRetry = millis();
+    WiFi.reconnect();
+  }
+
+  if (!updateInProgress &&
+      millis() - lastUpdateCheck >= UPDATE_INTERVAL) {
+    lastUpdateCheck = millis();
+    checkGitHubUpdate();
+  }
+
+  delay(1);
 }
