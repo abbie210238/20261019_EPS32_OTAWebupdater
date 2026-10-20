@@ -1,4 +1,9 @@
-
+/*   
+   20 21  改WIFI帳密    const char* ssid = "labor";  const char* password = "98668800";
+   26     改版本編號 const char* CURRENT_VERSION = "0.0.1";
+   29     你的github首頁/version.json
+   71 72  內網更新帳密 "userid" 'pwd'
+*/
 #include <WiFi.h>
 #include <WiFiClient.h>
 #include <WiFiClientSecure.h>
